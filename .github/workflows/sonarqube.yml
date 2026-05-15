@@ -110,6 +110,7 @@ jobs:
         with:
           args: >
             -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY || 'nammglobal-backend' }}
+            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
             -Dsonar.projectName="NAMM GLOBAL Backend"
             -Dsonar.sources=app
             -Dsonar.tests=tests

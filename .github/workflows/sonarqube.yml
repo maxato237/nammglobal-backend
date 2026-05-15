@@ -67,12 +67,16 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          pytest tests/ \
-            --cov=app \
-            --cov-report=xml:coverage.xml \
-            --cov-report=term-missing \
-            --tb=short \
-            -q
+          if [ -d "tests" ]; then
+            pytest tests/ \
+              --cov=app \
+              --cov-report=xml:coverage.xml \
+              --cov-report=term-missing \
+              --tb=short \
+              -q
+          else
+            echo "No tests directory found — skipping pytest."
+          fi
         continue-on-error: true   # SonarQube reçoit le rapport même si des tests échouent
 
       - name: Upload coverage artifact
@@ -113,7 +117,6 @@ jobs:
             -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
             -Dsonar.projectName="NAMM GLOBAL Backend"
             -Dsonar.sources=app
-            -Dsonar.tests=tests
             -Dsonar.python.coverage.reportPaths=coverage.xml
             -Dsonar.exclusions=**/migrations/**,**/__pycache__/**,**/venv/**,seed.py,all.model.py
             -Dsonar.sourceEncoding=UTF-8

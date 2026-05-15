@@ -75,12 +75,14 @@ jobs:
               --tb=short \
               -q
           else
-            echo "No tests directory found — skipping pytest."
+            echo "No tests directory found — generating empty coverage report."
+            echo '<?xml version="1.0" ?><coverage version="7.0"></coverage>' > coverage.xml
           fi
-        continue-on-error: true   # SonarQube reçoit le rapport même si des tests échouent
+        continue-on-error: true
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
+        if: always()   # upload même si pytest échoue ou si tests/ est absent
         with:
           name: coverage-report
           path: coverage.xml

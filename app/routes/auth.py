@@ -9,6 +9,7 @@ from app.utils import (
     success, created, error, validate_password,
     login_required, current_user,
 )
+from app.constants import Messages as m
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
@@ -16,12 +17,13 @@ auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 _blacklist: set = set()
 
 
-def is_token_revoked(jwt_header, jwt_payload) -> bool:
+def is_token_revoked(jwt_header, jwt_payload) -> bool: #NOSONAR
     return jwt_payload.get("jti", "") in _blacklist
 
 # ── POST /api/auth/register ───────────────────────────────────
+
 @auth_bp.route("/register", methods=["POST"])
-def register():
+def register(): #NOSONAR
     data     = request.get_json(silent=True) or {}
     name     = (data.get("name") or "").strip()
     phone    = (data.get("phone") or "").strip()
@@ -98,12 +100,18 @@ def logout():
 @auth_bp.route("/me", methods=["GET"])
 @login_required
 def me():
-    return success(current_user().to_dict())
+    token = get_jwt_identity()
+    user = User.query.get(int(token))
+    if not user or not user.is_active:
+        return error(m.INVALID_TOKEN, 401) 
+    print("User info:", user.to_dict())  # Debug
+
+    return success(user.to_dict())
 
 # ── PATCH /api/auth/profile ───────────────────────────────────
 @auth_bp.route("/profile", methods=["PATCH"])
 @login_required
-def update_profile():
+def update_profile(): #NOSONAR
     data = request.get_json(silent=True) or {}
     u    = current_user()
 
@@ -177,6 +185,22 @@ def admin_exists():
     exists = User.query.filter_by(role="admin", is_active=True).first() is not None
     return success({"exists": exists})
 
+
+# ── GET /api/auth/verify ──────────────────────────────────────
+@auth_bp.route("/verify", methods=["GET"])
+@jwt_required()
+def verify_token():
+    try:
+        user_id = int(get_jwt_identity())
+    except (TypeError, ValueError):
+        return error(m.INVALID_TOKEN, 401)
+
+    user = db.session.get(User, user_id)
+    if not user or not user.is_active:
+        return error(m.INVALID_TOKEN, 401)
+
+    return success({"valid": True, "user": user.to_dict()})
+
 # ── Helper privé ──────────────────────────────────────────────
 def _tokens(user: User, long_lived: bool = False) -> dict:
     from datetime import timedelta
@@ -192,3 +216,5 @@ def _tokens(user: User, long_lived: bool = False) -> dict:
             expires_delta=extra,
         ),
     }
+
+

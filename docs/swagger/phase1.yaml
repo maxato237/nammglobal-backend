@@ -1,0 +1,757 @@
+info:
+  title: NAMM GLOBAL API — Phase 1
+  description: |
+    Documentation complète de la **Phase 1 — Foundation** du backend NAMM GLOBAL.
+
+    ## Authentification
+    Les routes protégées nécessitent un JWT dans le header :
+    ```
+    Authorization: Bearer <accessToken>
+    ```
+    Le token est obtenu via `/api/auth/login` ou `/api/auth/register`.
+
+    ## Flux mot de passe oublié
+    1. `POST /api/auth/password/reset/request` → reçoit un OTP WhatsApp + `tokenId`
+    2. `POST /api/auth/password/reset/verify-otp` → valide l'OTP → reçoit `resetToken`
+    3. `POST /api/auth/password/reset/confirm` → applique le nouveau mot de passe
+  version: "2.0.0"
+  contact:
+    name: NAMM GLOBAL Tech
+    email: nkengatomaxime2@gmail.com
+
+host: "127.0.0.1:5000"
+basePath: "/"
+schemes:
+  - http
+  - https
+
+consumes:
+  - application/json
+produces:
+  - application/json
+
+securityDefinitions:
+  BearerAuth:
+    type: apiKey
+    in: header
+    name: Authorization
+    description: "Format : Bearer <accessToken>"
+
+tags:
+  - name: Auth
+    description: Inscription, connexion, tokens JWT
+  - name: Password Reset
+    description: Réinitialisation mot de passe via OTP WhatsApp (3 étapes)
+  - name: Profile
+    description: Consultation et mise à jour du profil utilisateur connecté
+  - name: Admin — Auth
+    description: Setup et connexion administrateur
+  - name: Admin — Users
+    description: Gestion des utilisateurs (admin uniquement)
+
+# ─────────────────────────────────────────────
+# Définitions réutilisables
+# ─────────────────────────────────────────────
+definitions:
+
+  ApiSuccess:
+    type: object
+    properties:
+      success:
+        type: boolean
+        example: true
+      message:
+        type: string
+
+  ApiError:
+    type: object
+    properties:
+      success:
+        type: boolean
+        example: false
+      message:
+        type: string
+
+  Tokens:
+    type: object
+    properties:
+      accessToken:
+        type: string
+        example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      refreshToken:
+        type: string
+        example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+
+  User:
+    type: object
+    properties:
+      id:
+        type: integer
+        example: 1
+      fullName:
+        type: string
+        example: "Marie Dupont"
+      phone:
+        type: string
+        example: "+237699000001"
+      whatsapp:
+        type: string
+        example: "+237699000001"
+      email:
+        type: string
+        example: "marie@example.com"
+      countryCode:
+        type: string
+        example: "CM"
+      city:
+        type: string
+        example: "Douala"
+      role:
+        type: string
+        enum: [client, operator, super_admin]
+      emailVerified:
+        type: boolean
+      phoneVerified:
+        type: boolean
+      isActive:
+        type: boolean
+      isLocked:
+        type: boolean
+      preferredOtpChannel:
+        type: string
+        enum: [whatsapp, email]
+      avatarUrl:
+        type: string
+        x-nullable: true
+      initials:
+        type: string
+        example: "MD"
+      profileComplete:
+        type: boolean
+      lastLoginAt:
+        type: string
+        format: date-time
+        x-nullable: true
+      createdAt:
+        type: string
+        format: date-time
+
+  UserWithTokens:
+    allOf:
+      - $ref: '#/definitions/User'
+      - $ref: '#/definitions/Tokens'
+
+# ─────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────
+paths:
+
+  # ── Santé ────────────────────────────────────────────────────
+  /api/health:
+    get:
+      tags: [Auth]
+      summary: Vérifier que le serveur répond
+      operationId: health_check
+      responses:
+        200:
+          description: Serveur opérationnel
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+                example: ok
+              service:
+                type: string
+                example: "NAMM GLOBAL API v2"
+
+  # ── Inscription / Connexion ───────────────────────────────────
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Créer un compte client
+      operationId: auth_register
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+            required: [name, phone, password]
+            properties:
+              name:
+                type: string
+                example: "Marie Dupont"
+              phone:
+                type: string
+                example: "+237699000001"
+              password:
+                type: string
+                example: "SecurePass1!"
+              email:
+                type: string
+                example: "marie@example.com"
+              whatsapp:
+                type: string
+                example: "+237699000001"
+              country:
+                type: string
+                example: "CM"
+                description: Code pays ISO-2
+              city:
+                type: string
+                example: "Douala"
+      responses:
+        201:
+          description: Compte créé
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    $ref: '#/definitions/UserWithTokens'
+        400:
+          description: Champs manquants ou mot de passe trop faible
+          schema:
+            $ref: '#/definitions/ApiError'
+        409:
+          description: Numéro ou email déjà utilisé
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Connexion par téléphone + mot de passe
+      operationId: auth_login
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+            required: [phone, password]
+            properties:
+              phone:
+                type: string
+                example: "+237699000001"
+              password:
+                type: string
+                example: "SecurePass1!"
+              remember:
+                type: boolean
+                default: false
+                description: "true → refresh token valable 30 jours"
+      responses:
+        200:
+          description: Connexion réussie
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    $ref: '#/definitions/UserWithTokens'
+        400:
+          description: Champs manquants
+          schema:
+            $ref: '#/definitions/ApiError'
+        401:
+          description: Identifiants incorrects
+          schema:
+            $ref: '#/definitions/ApiError'
+        403:
+          description: Compte désactivé
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  /api/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Renouveler l'access token via le refresh token
+      operationId: auth_refresh
+      description: "Mettre le **refreshToken** (pas l'accessToken) dans Authorization: Bearer <refreshToken>"
+      security:
+        - BearerAuth: []
+      responses:
+        200:
+          description: Nouveau access token
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      accessToken:
+                        type: string
+        401:
+          description: Refresh token invalide ou expiré
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Révoquer l'access token courant (blacklist)
+      operationId: auth_logout
+      security:
+        - BearerAuth: []
+      responses:
+        200:
+          description: Déconnecté avec succès
+          schema:
+            $ref: '#/definitions/ApiSuccess'
+        401:
+          description: Token manquant
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  /api/auth/verify:
+    get:
+      tags: [Auth]
+      summary: Vérifier la validité d'un access token
+      operationId: auth_verify
+      security:
+        - BearerAuth: []
+      responses:
+        200:
+          description: Token valide
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      valid:
+                        type: boolean
+                        example: true
+                      user:
+                        $ref: '#/definitions/User'
+        401:
+          description: Token invalide ou expiré
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  # ── Profil ────────────────────────────────────────────────────
+  /api/auth/me:
+    get:
+      tags: [Profile]
+      summary: Obtenir son propre profil
+      operationId: auth_me
+      security:
+        - BearerAuth: []
+      responses:
+        200:
+          description: Profil de l'utilisateur connecté
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    $ref: '#/definitions/User'
+        401:
+          description: Non authentifié
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  /api/auth/profile:
+    patch:
+      tags: [Profile]
+      summary: Mettre à jour son profil
+      operationId: auth_update_profile
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: body
+          name: body
+          schema:
+            type: object
+            properties:
+              firstName:
+                type: string
+                example: "Marie"
+              lastName:
+                type: string
+                example: "Dupont"
+              email:
+                type: string
+                example: "marie@example.com"
+              whatsapp:
+                type: string
+                example: "+237699000001"
+              countryCode:
+                type: string
+                example: "CM"
+              city:
+                type: string
+                example: "Yaoundé"
+              newPassword:
+                type: string
+                description: Change le mot de passe si fourni
+      responses:
+        200:
+          description: Profil mis à jour
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    $ref: '#/definitions/User'
+        400:
+          description: Mot de passe invalide
+          schema:
+            $ref: '#/definitions/ApiError'
+        401:
+          description: Non authentifié
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  # ── Mot de passe oublié ───────────────────────────────────────
+  /api/auth/password/reset/request:
+    post:
+      tags: [Password Reset]
+      summary: "Étape 1 — Envoyer un OTP par WhatsApp"
+      operationId: password_reset_request
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+            required: [phone]
+            properties:
+              phone:
+                type: string
+                example: "+237699000001"
+              channel:
+                type: string
+                enum: [whatsapp, email]
+                default: whatsapp
+      responses:
+        200:
+          description: "OTP envoyé — retourne tokenId pour l'étape 2"
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      tokenId:
+                        type: integer
+                        example: 42
+        400:
+          description: Numéro manquant
+          schema:
+            $ref: '#/definitions/ApiError'
+        503:
+          description: Échec d'envoi WhatsApp
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  /api/auth/password/reset/verify-otp:
+    post:
+      tags: [Password Reset]
+      summary: "Étape 2 — Valider l'OTP reçu"
+      operationId: password_reset_verify_otp
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+            required: [tokenId, otp]
+            properties:
+              tokenId:
+                type: integer
+                example: 42
+                description: "ID reçu à l'étape 1"
+              otp:
+                type: string
+                example: "482917"
+                description: Code à 6 chiffres reçu par WhatsApp
+      responses:
+        200:
+          description: "OTP validé — retourne resetToken pour l'étape 3"
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      resetToken:
+                        type: string
+                        example: "a3b4c5d6-e7f8-4a1b-9c2d-..."
+        400:
+          description: "OTP invalide, expiré ou trop de tentatives (max 3)"
+          schema:
+            $ref: '#/definitions/ApiError'
+        404:
+          description: Demande introuvable
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  /api/auth/password/reset/confirm:
+    post:
+      tags: [Password Reset]
+      summary: "Étape 3 — Appliquer le nouveau mot de passe"
+      operationId: password_reset_confirm
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+            required: [resetToken, newPassword]
+            properties:
+              resetToken:
+                type: string
+                example: "a3b4c5d6-e7f8-4a1b-9c2d-..."
+              newPassword:
+                type: string
+                example: "NouveauPass1!"
+      responses:
+        200:
+          description: Mot de passe réinitialisé avec succès
+          schema:
+            $ref: '#/definitions/ApiSuccess'
+        400:
+          description: Token invalide/expiré ou mot de passe trop faible
+          schema:
+            $ref: '#/definitions/ApiError'
+        404:
+          description: Utilisateur introuvable
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  # ── Admin — Auth ─────────────────────────────────────────────
+  /api/auth/admin/exists:
+    get:
+      tags: [Admin — Auth]
+      summary: Vérifier si un super_admin existe déjà
+      operationId: admin_exists
+      responses:
+        200:
+          description: Statut d'existence
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      exists:
+                        type: boolean
+                        example: false
+
+  /api/auth/admin/setup:
+    post:
+      tags: [Admin — Auth]
+      summary: "Créer le premier super_admin (bloqué si déjà existant)"
+      operationId: admin_setup
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+            required: [name, phone, password]
+            properties:
+              name:
+                type: string
+                example: "Admin Principal"
+              phone:
+                type: string
+                example: "+237699100000"
+              password:
+                type: string
+                example: "AdminPass1!"
+      responses:
+        201:
+          description: Compte super_admin créé
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    $ref: '#/definitions/UserWithTokens'
+        400:
+          description: Champs manquants ou mot de passe invalide
+          schema:
+            $ref: '#/definitions/ApiError'
+        409:
+          description: Un admin existe déjà ou numéro pris
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  /api/auth/admin/login:
+    post:
+      tags: [Admin — Auth]
+      summary: Connexion administrateur
+      operationId: admin_login
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+            required: [phone, password]
+            properties:
+              phone:
+                type: string
+                example: "+237699100000"
+              password:
+                type: string
+                example: "AdminPass1!"
+      responses:
+        200:
+          description: Connexion admin réussie
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    $ref: '#/definitions/UserWithTokens'
+        401:
+          description: Identifiants incorrects ou compte non admin
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  # ── Admin — Gestion utilisateurs ─────────────────────────────
+  /api/users:
+    get:
+      tags: [Admin — Users]
+      summary: Lister les utilisateurs
+      operationId: admin_list_users
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: role
+          type: string
+          enum: [client, operator, super_admin]
+          default: client
+          description: Filtrer par rôle
+      responses:
+        200:
+          description: Liste des utilisateurs
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/definitions/User'
+        401:
+          description: Non authentifié
+          schema:
+            $ref: '#/definitions/ApiError'
+        403:
+          description: Accès réservé aux admins
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  /api/users/{userId}:
+    get:
+      tags: [Admin — Users]
+      summary: Détail d'un utilisateur
+      operationId: admin_get_user
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: userId
+          type: integer
+          required: true
+          example: 1
+      responses:
+        200:
+          description: Détail utilisateur
+          schema:
+            allOf:
+              - $ref: '#/definitions/ApiSuccess'
+              - type: object
+                properties:
+                  data:
+                    $ref: '#/definitions/User'
+        401:
+          description: Non authentifié
+          schema:
+            $ref: '#/definitions/ApiError'
+        403:
+          description: Accès refusé
+          schema:
+            $ref: '#/definitions/ApiError'
+        404:
+          description: Utilisateur introuvable
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  /api/users/{userId}/deactivate:
+    patch:
+      tags: [Admin — Users]
+      summary: Désactiver un compte utilisateur (+ audit log)
+      operationId: admin_deactivate_user
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: userId
+          type: integer
+          required: true
+          example: 5
+      responses:
+        200:
+          description: Compte désactivé
+          schema:
+            $ref: '#/definitions/ApiSuccess'
+        403:
+          description: Accès refusé ou tentative sur un admin
+          schema:
+            $ref: '#/definitions/ApiError'
+        404:
+          description: Utilisateur introuvable
+          schema:
+            $ref: '#/definitions/ApiError'
+
+  /api/users/{userId}/reactivate:
+    patch:
+      tags: [Admin — Users]
+      summary: Réactiver un compte utilisateur (+ audit log)
+      operationId: admin_reactivate_user
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: userId
+          type: integer
+          required: true
+          example: 5
+      responses:
+        200:
+          description: Compte réactivé
+          schema:
+            $ref: '#/definitions/ApiSuccess'
+        403:
+          description: Accès refusé
+          schema:
+            $ref: '#/definitions/ApiError'
+        404:
+          description: Utilisateur introuvable
+          schema:
+            $ref: '#/definitions/ApiError'

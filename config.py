@@ -5,7 +5,7 @@ load_dotenv()
 
 class Config:
     SECRET_KEY                     = os.environ.get("SECRET_KEY", "dev-secret")
-    DEBUG                          = False
+    DEBUG                          = True
     POSTGRESQL_CONNEXION = {
         'host': 'localhost',
         'user': 'postgres',
@@ -13,11 +13,14 @@ class Config:
         'database': 'nammglobalBD',
         'port': '5432'
     }
-    
-    SQLALCHEMY_DATABASE_URI = (
-        f"postgresql://{POSTGRESQL_CONNEXION['user']}:{POSTGRESQL_CONNEXION['password']}"
-        f"@{POSTGRESQL_CONNEXION['host']}:{POSTGRESQL_CONNEXION['port']}"
-        f"/{POSTGRESQL_CONNEXION['database']}"
+
+    if(os.environ.get("DATABASE_URL")):
+        SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL")
+    else:
+        SQLALCHEMY_DATABASE_URI = (
+            f"postgresql://{POSTGRESQL_CONNEXION['user']}:{POSTGRESQL_CONNEXION['password']}"
+            f"@{POSTGRESQL_CONNEXION['host']}:{POSTGRESQL_CONNEXION['port']}"
+            f"/{POSTGRESQL_CONNEXION['database']}"
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     JWT_SECRET_KEY                 = os.environ.get("JWT_SECRET_KEY", SECRET_KEY)
@@ -28,7 +31,7 @@ class Config:
     JWT_HEADER_TYPE                = "Bearer"
     JWT_BLACKLIST_ENABLED          = True
     JWT_BLACKLIST_TOKEN_CHECKS     = ["access","refresh"]
-    FRONTEND_URL                   = os.environ.get("FRONTEND_URL","http://localhost:5500")
+    FRONTEND_URL                   = os.environ.get("FRONTEND_URL","http://localhost:4200")
     FLUTTERWAVE_SECRET_KEY         = os.environ.get("FLUTTERWAVE_SECRET_KEY","")
     CLOUDINARY_CLOUD_NAME          = os.environ.get("CLOUDINARY_CLOUD_NAME","")
     CLOUDINARY_API_KEY             = os.environ.get("CLOUDINARY_API_KEY","")

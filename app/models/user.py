@@ -10,6 +10,7 @@ class UserRole(str, enum.Enum):
 
 
 class OtpChannel(str, enum.Enum):
+    SMS      = "sms"
     WHATSAPP = "whatsapp"
     EMAIL    = "email"
 
@@ -30,7 +31,7 @@ class User(db.Model):
     password_hash = db.Column(db.Text, nullable=False)
 
     role = db.Column(
-        db.Enum(UserRole, name="user_role"),
+        db.Enum(UserRole, name="user_role", values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=UserRole.CLIENT,
     )
@@ -48,9 +49,9 @@ class User(db.Model):
 
     # Préférences OTP
     preferred_otp_channel = db.Column(
-        db.Enum(OtpChannel, name="otp_channel"),
+        db.Enum(OtpChannel, name="otp_channel", values_callable=lambda x: [e.value for e in x]),
         nullable=False,
-        default=OtpChannel.WHATSAPP,
+        default=OtpChannel.SMS,
     )
 
     # Avatar Cloudinary
@@ -62,15 +63,11 @@ class User(db.Model):
     deleted_at = db.Column(db.DateTime, nullable=True)   # soft delete
 
     # ── Relations ─────────────────────────────────────────────
-    country        = db.relationship("Country", foreign_keys=[country_code], backref=db.backref("users", lazy="dynamic"))
-    requests       = db.relationship("Request",      back_populates="user",  lazy="dynamic")
-    notifications  = db.relationship("Notification", back_populates="user",  lazy="dynamic")
-    reset_tokens   = db.relationship("PasswordResetToken", backref="user",   lazy="dynamic")
-    refresh_tokens = db.relationship("RefreshToken",       backref="user",   lazy="dynamic")
-    audit_logs     = db.relationship("AuditLog",           backref="actor",  lazy="dynamic",
-                                     foreign_keys="AuditLog.actor_user_id")
-    setting_updates = db.relationship("SystemSetting", backref="updated_by", lazy="dynamic",
-                                      foreign_keys="SystemSetting.updated_by_user_id")
+    country       = db.relationship("Country", foreign_keys=[country_code], backref=db.backref("users", lazy="dynamic"))
+    requests      = db.relationship("Request",      back_populates="user", lazy="dynamic")
+    notifications = db.relationship("Notification", back_populates="user", lazy="dynamic")
+    # reset_tokens, refresh_tokens, audit_logs, setting_updates :
+    # backrefs définis dans les modèles respectifs (auth_token, audit, system_setting)
 
     # ── Password ──────────────────────────────────────────────
     def set_password(self, plain: str):

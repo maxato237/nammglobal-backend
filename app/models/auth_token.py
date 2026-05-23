@@ -1,5 +1,6 @@
 from datetime import datetime
 from app.extensions import db
+from app.models.user import OtpChannel
 
 
 class PasswordResetToken(db.Model):
@@ -9,7 +10,10 @@ class PasswordResetToken(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
     otp_code_hash = db.Column(db.String(255), nullable=False)
     attempts = db.Column(db.Integer, default=0)
-    channel = db.Column(db.Enum("whatsapp", "email", name="otp_channel"), default="whatsapp")
+    channel = db.Column(
+        db.Enum(OtpChannel, name="otp_channel", create_constraint=False, values_callable=lambda x: [e.value for e in x]),
+        default=OtpChannel.WHATSAPP,
+    )
     reset_token = db.Column(db.String(36), unique=True, nullable=True)
     reset_token_used_at = db.Column(db.DateTime, nullable=True)
     expires_at = db.Column(db.DateTime, nullable=False)

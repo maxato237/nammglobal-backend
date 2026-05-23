@@ -1,7 +1,8 @@
 from flask import Blueprint, request as req
 from app import db
 from app.models import User
-from app.utils import success, not_found, error, admin_required
+from app.services.audit_service import AuditService
+from app.utils import success, not_found, error, admin_required, current_user
 
 users_bp = Blueprint("users", __name__, url_prefix="/api/users")
 
@@ -38,6 +39,7 @@ def deactivate_user(user_id):
         return error("Impossible de désactiver un administrateur.", 403)
     u.is_active = False
     db.session.commit()
+    AuditService.log("User", "deactivate", entity_id=u.id, actor=current_user())
     return success(message="Compte désactivé.")
 
 
@@ -49,4 +51,5 @@ def reactivate_user(user_id):
         return not_found("Utilisateur introuvable.")
     u.is_active = True
     db.session.commit()
+    AuditService.log("User", "reactivate", entity_id=u.id, actor=current_user())
     return success(message="Compte réactivé.")

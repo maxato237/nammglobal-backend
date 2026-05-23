@@ -9,14 +9,15 @@ def login_required(fn):
     """Route accessible aux utilisateurs connectés (client OU admin)."""
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        from app.utils.helpers import error as err
         try:
             verify_jwt_in_request()
         except Exception:
-            return forbidden("Authentification requise.")
+            return err("Authentification requise.", 401)
 
-        user = User.query.get_or_404(int(get_jwt_identity()))
+        user = User.query.get(int(get_jwt_identity()))
         if not user or not user.is_active:
-            return not_found("Utilisateur introuvable ou désactivé.")
+            return err("Utilisateur introuvable ou désactivé.", 401)
 
         g.current_user = user
         return fn(*args, **kwargs)
@@ -24,21 +25,20 @@ def login_required(fn):
 
 
 def admin_required(fn):
-    """Route accessible aux admins uniquement."""
+    """Route accessible aux opérateurs et super_admins uniquement."""
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        from app.utils.helpers import error as err
         try:
             verify_jwt_in_request()
         except Exception:
-            return forbidden("Authentification admin requise.")
-
-        claims = get_jwt()
-        if claims.get("role") != "admin":
-            return forbidden("Accès réservé à l'administrateur.")
+            return err("Authentification requise.", 401)
 
         user = User.query.get(int(get_jwt_identity()))
-        if not user or not user.is_active or not user.is_admin:
-            return not_found("Administrateur introuvable.")
+        if not user or not user.is_active:
+            return err("Utilisateur introuvable.", 401)
+        if not user.is_admin:
+            return forbidden("Accès réservé aux administrateurs.")
 
         g.current_user = user
         return fn(*args, **kwargs)

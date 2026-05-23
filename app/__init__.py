@@ -1,5 +1,7 @@
+import os
 import cloudinary
 from flask import Flask, jsonify
+from flasgger import Swagger
 
 from app.extensions import db, migrate, jwt, bcrypt, cors
 from app.errors import register_error_handlers
@@ -19,6 +21,16 @@ def create_app(config=None):
     migrate.init_app(app, db)
     jwt.init_app(app)
     bcrypt.init_app(app)
+
+    # ── Swagger / OpenAPI ─────────────────────────────────────────────────────
+    _spec_path = os.path.join(os.path.dirname(__file__), "..", "docs", "swagger", "phase1.yaml")
+    Swagger(app, template_file=os.path.abspath(_spec_path), config={
+        "headers": [],
+        "specs": [{"endpoint": "apispec", "route": "/api/docs/spec.json", "rule_filter": lambda rule: True, "model_filter": lambda tag: True}],
+        "static_url_path": "/flasgger_static",
+        "swagger_ui": True,
+        "specs_route": "/api/docs/",
+    })
 
     # ── Cloudinary ────────────────────────────────────────────────────────────
     cloudinary.config(
@@ -69,6 +81,5 @@ def create_app(config=None):
             GalleryItem, Notification,
             ServiceFeeRule, ShippingMethod, ProductCategoryRule, Stat,
         )
-        db.create_all()
 
     return app

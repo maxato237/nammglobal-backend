@@ -1,5 +1,8 @@
 import os
+import logging
 from twilio.rest import Client
+
+logger = logging.getLogger(__name__)
 
 
 class SmsService:
@@ -23,8 +26,9 @@ class SmsService:
             msg = cls._client().messages.create(
                 body=message,
                 from_=os.environ.get("TWILIO_FROM_NUMBER", ""),
-                to="+237654837863", #Numéro verifié pour les tests, sur Twilio
+                to=+237654837863,
             )
             return msg.sid is not None
-        except Exception:
+        except Exception as e:
+            logger.error("Twilio send_text failed: %s", e)
             return False

@@ -65,6 +65,7 @@ def login():
         return error("Téléphone et mot de passe requis.")
 
     user = User.query.filter_by(phone=phone).first()
+
     if not user or not user.check_password(password):
         return error("Numéro ou mot de passe incorrect.", 401)
     if not user.is_active:
@@ -246,7 +247,7 @@ def password_reset_request():
     )
 
     import os
-    if os.environ.get("DEBUG_OTP", "").lower() == "true":
+    if os.environ.get("DEBUG_OTP", "").lower() == "true":   
         return success({"tokenId": token.id, "otp": otp}, "OTP généré (mode debug).")
 
     sent = SmsService.send_otp(user.phone, otp)
@@ -313,7 +314,7 @@ def _tokens(user: User, long_lived: bool = False) -> dict:
     from datetime import timedelta
     from app.services.auth_service import AuthService
 
-    extra = timedelta(days=30) if long_lived else None
+    extra = timedelta(days=30) if long_lived else timedelta(days=1)
 
     access = create_access_token(
         identity=str(user.id),

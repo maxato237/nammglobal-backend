@@ -1,214 +1,466 @@
-from flask import Blueprint, request as req
+from flask import Blueprint, request as req, g
+from pydantic import ValidationError
+
 from app import db
-from app.models import ServiceFeeRule, ShippingMethod, ProductCategoryRule
+from app.models import (
+    ServiceFeeRule, ShippingMethod, ProductCategoryRule,
+    CustomsRule, ExchangeRate, Country,
+)
 from app.services import PricingService
-from app.utils import success, created, error, not_found, admin_required
+from app.services.audit_service import AuditService
+from app.schemas.pricing import (
+    ShippingMethodCreateIn, ShippingMethodUpdateIn,
+    ServiceFeeRuleCreateIn, ServiceFeeRuleUpdateIn,
+    ProductCategoryRuleCreateIn, ProductCategoryRuleUpdateIn,
+    CustomsRuleCreateIn, CustomsRuleUpdateIn,
+    ExchangeRateCreateIn,
+    QuoteEstimateIn,
+)
+from app.utils import success, created, error, not_found, admin_required, login_required, current_user
 
 pricing_bp = Blueprint("pricing", __name__, url_prefix="/api/pricing")
 
 
-# ── Frais de service ──────────────────────────────────────────
+def _validate(schema_cls, data: dict):
+    """Valide data avec le schema Pydantic. Retourne (instance, None) ou (None, error_response)."""
+    try:
+        return schema_cls(**data), None
+    except ValidationError as e:
+        msgs = [f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()]
+        return None, error("Données invalides.", 422, errors=msgs)
 
-@pricing_bp.route("/fees", methods=["GET"])
-def list_fees():
-    rules = ServiceFeeRule.query.order_by(ServiceFeeRule.min_amount).all()
-    return success([r.to_dict() for r in rules])
+
+def _country_or_404(cc: str):
+    """Vérifie que le code pays existe et est desservi."""
+    cc = cc.upper()
+    country = Country.query.filter_by(code=cc).first()
+    if not country:
+        return None, not_found(f"Pays '{cc}' introuvable.")
+    return cc, None
 
 
-@pricing_bp.route("/fees", methods=["POST"])
+# ── Bundle complet ─────────────────────────────────────────────
+
+@pricing_bp.route("/<cc>", methods=["GET"])
+def get_bundle(cc: str):
+    """Retourne le pricing complet d'un pays en un seul appel."""
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+    return success(PricingService.get_pricing_bundle(cc))
+
+
+# ── Taux de change ─────────────────────────────────────────────
+
+@pricing_bp.route("/exchange-rate", methods=["GET"])
+def get_exchange_rate():
+    rate = PricingService.get_active_exchange_rate("CNY", "XAF")
+    if not rate:
+        return not_found("Aucun taux de change CNY/FCFA actif.")
+    return success(rate.to_dict())
+
+
+@pricing_bp.route("/exchange-rate", methods=["POST"])
 @admin_required
-def create_fee():
-    data = req.get_json(silent=True) or {}
+def create_exchange_rate():
+    user = current_user()
+    if user.role != "super_admin":
+        return error("Réservé au super_admin.", 403)
 
-    # minAmount et percentage sont obligatoires ; maxAmount peut être None (tranche illimitée)
-    if data.get("minAmount") is None or data.get("percentage") is None:
-        return error("minAmount et percentage sont obligatoires.")
+    payload, err = _validate(ExchangeRateCreateIn, req.get_json(silent=True) or {})
+    if err:
+        return err
 
-    rule = ServiceFeeRule(
-        min_amount = float(data["minAmount"]),
-        max_amount = float(data["maxAmount"]) if data.get("maxAmount") is not None else None,
-        percentage = float(data["percentage"]),
-        label      = (data.get("label") or "").strip() or None,
+    rate = PricingService.update_exchange_rate(
+        from_currency=payload.from_currency,
+        to_currency=payload.to_currency,
+        rate=payload.rate,
+        actor=user,
+        ip=req.remote_addr,
+        ua=req.headers.get("User-Agent", ""),
     )
-    db.session.add(rule)
-    db.session.commit()
-    return created(rule.to_dict(), "Règle créée.")
+    return created(rate.to_dict(), "Taux de change mis à jour.")
 
 
-@pricing_bp.route("/fees/<int:rule_id>", methods=["PUT"])
-@admin_required
-def update_fee(rule_id):
-    rule = ServiceFeeRule.query.get(rule_id)
-    if not rule:
-        return not_found("Règle introuvable.")
-    data = req.get_json(silent=True) or {}
-    if "minAmount"  in data: rule.min_amount  = float(data["minAmount"])
-    if "maxAmount"  in data: rule.max_amount  = float(data["maxAmount"]) if data["maxAmount"] is not None else None
-    if "percentage" in data: rule.percentage  = float(data["percentage"])
-    if "label"      in data: rule.label       = data["label"]
-    db.session.commit()
-    return success(rule.to_dict(), "Règle mise à jour.")
+# ── Simulateur de devis ────────────────────────────────────────
+
+@pricing_bp.route("/quote/estimate", methods=["POST"])
+@login_required
+def quote_estimate():
+    payload, err = _validate(QuoteEstimateIn, req.get_json(silent=True) or {})
+    if err:
+        return err
+
+    cc, err = _country_or_404(payload.country_code)
+    if err:
+        return err
+
+    try:
+        result = PricingService.estimate_quote(
+            country_code=cc,
+            items=[item.model_dump() for item in payload.items],
+            shipping_method_id=payload.shipping_method_id,
+        )
+        return success(result)
+    except ValueError as e:
+        return error(str(e))
 
 
-@pricing_bp.route("/fees/<int:rule_id>", methods=["DELETE"])
-@admin_required
-def delete_fee(rule_id):
-    rule = ServiceFeeRule.query.get(rule_id)
-    if not rule:
-        return not_found("Règle introuvable.")
-    db.session.delete(rule)
-    db.session.commit()
-    return success(message="Règle supprimée.")
+# ── Méthodes d'expédition ──────────────────────────────────────
 
-
-# ── Modes de transport ────────────────────────────────────────
-
-@pricing_bp.route("/shipping", methods=["GET"])
-def list_shipping():
-    # Tous les modes pour l'admin (via ?all=1), actifs uniquement pour le public
+@pricing_bp.route("/<cc>/shipping", methods=["GET"])
+def list_shipping(cc: str):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
     show_all = req.args.get("all") == "1"
-    q = ShippingMethod.query
+    q = ShippingMethod.query.filter_by(country_code=cc)
     if not show_all:
         q = q.filter_by(is_active=True)
-    return success([m.to_dict() for m in q.all()])
+    return success([m.to_dict() for m in q.order_by(ShippingMethod.sort_order).all()])
 
 
-@pricing_bp.route("/shipping", methods=["POST"])
+@pricing_bp.route("/<cc>/shipping", methods=["POST"])
 @admin_required
-def create_shipping():
+def create_shipping(cc: str):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+
     data = req.get_json(silent=True) or {}
-    if not data.get("name") or data.get("pricePerKg") is None:
-        return error("name et pricePerKg sont obligatoires.")
+    data["country_code"] = cc
+    payload, err = _validate(ShippingMethodCreateIn, data)
+    if err:
+        return err
+
     m = ShippingMethod(
-        name         = data["name"].strip(),
-        timeframe    = data.get("timeframe"),
-        price_per_kg = float(data["pricePerKg"]),
-        max_kg       = float(data["maxKg"]) if data.get("maxKg") is not None else None,
-        icon         = data.get("icon"),
+        country_code=cc,
+        name=payload.name,
+        timeframe_days_min=payload.timeframe_days_min,
+        timeframe_days_max=payload.timeframe_days_max,
+        price_per_kg=payload.price_per_kg,
+        min_kg=payload.min_kg,
+        max_kg=payload.max_kg,
+        icon=payload.icon,
+        is_active=payload.is_active,
+        sort_order=payload.sort_order,
     )
     db.session.add(m)
     db.session.commit()
-    return created(m.to_dict(), "Mode de transport créé.")
+
+    AuditService.log("shipping_method", "create", entity_id=m.id, actor=current_user(),
+                     after_state=m.to_dict(), ip_address=req.remote_addr)
+    return created(m.to_dict(), "Mode d'expédition créé.")
 
 
-@pricing_bp.route("/shipping/<int:method_id>", methods=["PUT"])
+@pricing_bp.route("/<cc>/shipping/<int:method_id>", methods=["PATCH"])
 @admin_required
-def update_shipping(method_id):
-    m = ShippingMethod.query.get(method_id)
+def update_shipping(cc: str, method_id: int):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+
+    m = ShippingMethod.query.filter_by(id=method_id, country_code=cc).first()
     if not m:
-        return not_found("Mode de transport introuvable.")
-    data = req.get_json(silent=True) or {}
-    if "name"       in data: m.name         = data["name"].strip()
-    if "timeframe"  in data: m.timeframe    = data["timeframe"]
-    if "pricePerKg" in data: m.price_per_kg = float(data["pricePerKg"])
-    if "maxKg"      in data: m.max_kg       = float(data["maxKg"]) if data["maxKg"] is not None else None
-    if "icon"       in data: m.icon         = data["icon"]
-    if "isActive"   in data: m.is_active    = bool(data["isActive"])
+        return not_found("Mode d'expédition introuvable.")
+
+    payload, err = _validate(ShippingMethodUpdateIn, req.get_json(silent=True) or {})
+    if err:
+        return err
+
+    before = m.to_dict()
+    if payload.name               is not None: m.name               = payload.name
+    if payload.timeframe_days_min is not None: m.timeframe_days_min = payload.timeframe_days_min
+    if payload.timeframe_days_max is not None: m.timeframe_days_max = payload.timeframe_days_max
+    if payload.price_per_kg       is not None: m.price_per_kg       = payload.price_per_kg
+    if payload.min_kg             is not None: m.min_kg             = payload.min_kg
+    if payload.max_kg             is not None: m.max_kg             = payload.max_kg
+    if payload.icon               is not None: m.icon               = payload.icon
+    if payload.is_active          is not None: m.is_active          = payload.is_active
+    if payload.sort_order         is not None: m.sort_order         = payload.sort_order
     db.session.commit()
-    return success(m.to_dict(), "Mode de transport mis à jour.")
+
+    AuditService.log("shipping_method", "update", entity_id=m.id, actor=current_user(),
+                     before_state=before, after_state=m.to_dict(), ip_address=req.remote_addr)
+    return success(m.to_dict(), "Mode d'expédition mis à jour.")
 
 
-@pricing_bp.route("/shipping/<int:method_id>", methods=["DELETE"])
+@pricing_bp.route("/<cc>/shipping/<int:method_id>", methods=["DELETE"])
 @admin_required
-def delete_shipping(method_id):
-    m = ShippingMethod.query.get(method_id)
+def delete_shipping(cc: str, method_id: int):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+
+    m = ShippingMethod.query.filter_by(id=method_id, country_code=cc).first()
     if not m:
-        return not_found("Mode de transport introuvable.")
-    # Soft-delete : désactivation plutôt que suppression (des devis peuvent référencer ce mode)
+        return not_found("Mode d'expédition introuvable.")
+
+    # Soft-delete : des devis peuvent référencer ce mode
+    before = m.to_dict()
     m.is_active = False
     db.session.commit()
-    return success(message="Mode de transport désactivé.")
+
+    AuditService.log("shipping_method", "deactivate", entity_id=m.id, actor=current_user(),
+                     before_state=before, after_state=m.to_dict(), ip_address=req.remote_addr)
+    return success(message="Mode d'expédition désactivé.")
 
 
-# ── Catégories produit ────────────────────────────────────────
+# ── Frais de service ───────────────────────────────────────────
 
-@pricing_bp.route("/categories", methods=["GET"])
-def list_categories():
-    return success([c.to_dict() for c in ProductCategoryRule.query.all()])
+@pricing_bp.route("/<cc>/service-fees", methods=["GET"])
+def list_fees(cc: str):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+    rules = ServiceFeeRule.query.filter_by(country_code=cc).order_by(ServiceFeeRule.min_amount_fcfa).all()
+    return success([r.to_dict() for r in rules])
 
 
-@pricing_bp.route("/categories", methods=["POST"])
+@pricing_bp.route("/<cc>/service-fees", methods=["POST"])
 @admin_required
-def create_category():
+def create_fee(cc: str):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+
     data = req.get_json(silent=True) or {}
-    if not data.get("categoryName"):
-        return error("categoryName est obligatoire.")
+    data["country_code"] = cc
+    payload, err = _validate(ServiceFeeRuleCreateIn, data)
+    if err:
+        return err
 
-    # surchargeType doit être cohérent avec les valeurs du modèle : per_kg | fixed | none
-    surcharge_type = data.get("surchargeType")
-    if surcharge_type and surcharge_type not in ("per_kg", "fixed", "none"):
-        return error("surchargeType invalide. Valeurs acceptées : per_kg, fixed, none.")
-
-    c = ProductCategoryRule(
-        category_name    = data["categoryName"].strip(),
-        surcharge_per_kg = float(data["surchargePerKg"]) if data.get("surchargePerKg") is not None else None,
-        surcharge_type   = surcharge_type,
-        note             = data.get("note"),
-        icon             = data.get("icon"),
+    rule = ServiceFeeRule(
+        country_code=cc,
+        min_amount_fcfa=payload.min_amount_fcfa,
+        max_amount_fcfa=payload.max_amount_fcfa,
+        percentage=payload.percentage,
+        label=payload.label,
     )
-    db.session.add(c)
+    db.session.add(rule)
     db.session.commit()
-    return created(c.to_dict(), "Catégorie créée.")
+
+    AuditService.log("service_fee_rule", "create", entity_id=rule.id, actor=current_user(),
+                     after_state=rule.to_dict(), ip_address=req.remote_addr)
+    return created(rule.to_dict(), "Règle de frais créée.")
 
 
-@pricing_bp.route("/categories/<int:cat_id>", methods=["PUT"])
+@pricing_bp.route("/<cc>/service-fees/<int:rule_id>", methods=["PATCH"])
 @admin_required
-def update_category(cat_id):
-    c = ProductCategoryRule.query.get(cat_id)
-    if not c:
-        return not_found("Catégorie introuvable.")
+def update_fee(cc: str, rule_id: int):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+
+    rule = ServiceFeeRule.query.filter_by(id=rule_id, country_code=cc).first()
+    if not rule:
+        return not_found("Règle introuvable.")
+
+    payload, err = _validate(ServiceFeeRuleUpdateIn, req.get_json(silent=True) or {})
+    if err:
+        return err
+
+    before = rule.to_dict()
+    if payload.min_amount_fcfa is not None: rule.min_amount_fcfa = payload.min_amount_fcfa
+    if payload.max_amount_fcfa is not None: rule.max_amount_fcfa = payload.max_amount_fcfa
+    if payload.percentage      is not None: rule.percentage      = payload.percentage
+    if payload.label           is not None: rule.label           = payload.label
+    db.session.commit()
+
+    AuditService.log("service_fee_rule", "update", entity_id=rule.id, actor=current_user(),
+                     before_state=before, after_state=rule.to_dict(), ip_address=req.remote_addr)
+    return success(rule.to_dict(), "Règle mise à jour.")
+
+
+@pricing_bp.route("/<cc>/service-fees/<int:rule_id>", methods=["DELETE"])
+@admin_required
+def delete_fee(cc: str, rule_id: int):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+
+    rule = ServiceFeeRule.query.filter_by(id=rule_id, country_code=cc).first()
+    if not rule:
+        return not_found("Règle introuvable.")
+
+    before = rule.to_dict()
+    db.session.delete(rule)
+    db.session.commit()
+
+    AuditService.log("service_fee_rule", "delete", entity_id=rule_id, actor=current_user(),
+                     before_state=before, ip_address=req.remote_addr)
+    return success(message="Règle supprimée.")
+
+
+# ── Catégories produit ─────────────────────────────────────────
+
+@pricing_bp.route("/<cc>/categories", methods=["GET"])
+def list_categories(cc: str):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+    cats = ProductCategoryRule.query.filter_by(country_code=cc).all()
+    return success([c.to_dict() for c in cats])
+
+
+@pricing_bp.route("/<cc>/categories", methods=["POST"])
+@admin_required
+def create_category(cc: str):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+
     data = req.get_json(silent=True) or {}
+    data["country_code"] = cc
+    payload, err = _validate(ProductCategoryRuleCreateIn, data)
+    if err:
+        return err
 
-    if "surchargeType" in data and data["surchargeType"] not in ("per_kg", "fixed", "none", None):
-        return error("surchargeType invalide. Valeurs acceptées : per_kg, fixed, none.")
-
-    if "categoryName"   in data: c.category_name    = data["categoryName"].strip()
-    if "surchargePerKg" in data: c.surcharge_per_kg = float(data["surchargePerKg"]) if data["surchargePerKg"] is not None else None
-    if "surchargeType"  in data: c.surcharge_type   = data["surchargeType"]
-    if "note"           in data: c.note             = data["note"]
-    if "icon"           in data: c.icon             = data["icon"]
+    cat = ProductCategoryRule(
+        country_code=cc,
+        category_name=payload.category_name,
+        surcharge_per_kg=payload.surcharge_per_kg,
+        surcharge_type=payload.surcharge_type,
+        customs_rate_pct=payload.customs_rate_pct,
+        note=payload.note,
+        icon=payload.icon,
+    )
+    db.session.add(cat)
     db.session.commit()
-    return success(c.to_dict(), "Catégorie mise à jour.")
+
+    AuditService.log("category_rule", "create", entity_id=cat.id, actor=current_user(),
+                     after_state=cat.to_dict(), ip_address=req.remote_addr)
+    return created(cat.to_dict(), "Catégorie créée.")
 
 
-@pricing_bp.route("/categories/<int:cat_id>", methods=["DELETE"])
+@pricing_bp.route("/<cc>/categories/<int:cat_id>", methods=["PATCH"])
 @admin_required
-def delete_category(cat_id):
-    c = ProductCategoryRule.query.get(cat_id)
-    if not c:
+def update_category(cc: str, cat_id: int):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+
+    cat = ProductCategoryRule.query.filter_by(id=cat_id, country_code=cc).first()
+    if not cat:
         return not_found("Catégorie introuvable.")
-    db.session.delete(c)
+
+    payload, err = _validate(ProductCategoryRuleUpdateIn, req.get_json(silent=True) or {})
+    if err:
+        return err
+
+    before = cat.to_dict()
+    if payload.category_name    is not None: cat.category_name    = payload.category_name
+    if payload.surcharge_per_kg is not None: cat.surcharge_per_kg = payload.surcharge_per_kg
+    if payload.surcharge_type   is not None: cat.surcharge_type   = payload.surcharge_type
+    if payload.customs_rate_pct is not None: cat.customs_rate_pct = payload.customs_rate_pct
+    if payload.note             is not None: cat.note             = payload.note
+    if payload.icon             is not None: cat.icon             = payload.icon
     db.session.commit()
+
+    AuditService.log("category_rule", "update", entity_id=cat.id, actor=current_user(),
+                     before_state=before, after_state=cat.to_dict(), ip_address=req.remote_addr)
+    return success(cat.to_dict(), "Catégorie mise à jour.")
+
+
+@pricing_bp.route("/<cc>/categories/<int:cat_id>", methods=["DELETE"])
+@admin_required
+def delete_category(cc: str, cat_id: int):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+
+    cat = ProductCategoryRule.query.filter_by(id=cat_id, country_code=cc).first()
+    if not cat:
+        return not_found("Catégorie introuvable.")
+
+    before = cat.to_dict()
+    db.session.delete(cat)
+    db.session.commit()
+
+    AuditService.log("category_rule", "delete", entity_id=cat_id, actor=current_user(),
+                     before_state=before, ip_address=req.remote_addr)
     return success(message="Catégorie supprimée.")
 
 
-# ── Simulateur ────────────────────────────────────────────────
+# ── Règles douanières ──────────────────────────────────────────
 
-@pricing_bp.route("/simulate", methods=["POST"])
-def simulate():
-    """Calcule les frais pour un panier (public — utilisé par la page tarifs)."""
+@pricing_bp.route("/<cc>/customs", methods=["GET"])
+def list_customs(cc: str):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+    rules = CustomsRule.query.filter_by(country_code=cc).order_by(CustomsRule.threshold_amount_fcfa).all()
+    return success([r.to_dict() for r in rules])
+
+
+@pricing_bp.route("/<cc>/customs", methods=["POST"])
+@admin_required
+def create_customs(cc: str):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+
     data = req.get_json(silent=True) or {}
-    try:
-        amount    = float(data.get("amount", 0))
-        weight_kg = float(data.get("weightKg", 0))
-        method_id = data.get("shippingMethodId")
-        category  = data.get("category")
+    data["country_code"] = cc
+    payload, err = _validate(CustomsRuleCreateIn, data)
+    if err:
+        return err
 
-        svc = PricingService.get_service_fee(amount)
-        result = {
-            "amount":         amount,
-            "serviceFee":     svc.get("amount"),
-            "serviceFeeRate": svc.get("percentage"),
-        }
+    rule = CustomsRule(
+        country_code=cc,
+        threshold_amount_fcfa=payload.threshold_amount_fcfa,
+        rate_pct=payload.rate_pct,
+        note=payload.note,
+    )
+    db.session.add(rule)
+    db.session.commit()
 
-        if method_id and weight_kg:
-            ship = PricingService.get_shipping_cost(int(method_id), weight_kg)
-            result["shippingCost"] = ship.get("cost")
+    AuditService.log("customs_rule", "create", entity_id=rule.id, actor=current_user(),
+                     after_state=rule.to_dict(), ip_address=req.remote_addr)
+    return created(rule.to_dict(), "Règle douanière créée.")
 
-        if category and weight_kg:
-            cat = PricingService.get_category_surcharge(category, weight_kg)
-            result["categorySurcharge"] = cat.get("surcharge")
 
-        return success(result)
-    except Exception as e:
-        return error(str(e))
+@pricing_bp.route("/<cc>/customs/<int:rule_id>", methods=["PATCH"])
+@admin_required
+def update_customs(cc: str, rule_id: int):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+
+    rule = CustomsRule.query.filter_by(id=rule_id, country_code=cc).first()
+    if not rule:
+        return not_found("Règle douanière introuvable.")
+
+    payload, err = _validate(CustomsRuleUpdateIn, req.get_json(silent=True) or {})
+    if err:
+        return err
+
+    before = rule.to_dict()
+    if payload.threshold_amount_fcfa is not None: rule.threshold_amount_fcfa = payload.threshold_amount_fcfa
+    if payload.rate_pct              is not None: rule.rate_pct              = payload.rate_pct
+    if payload.note                  is not None: rule.note                  = payload.note
+    db.session.commit()
+
+    AuditService.log("customs_rule", "update", entity_id=rule.id, actor=current_user(),
+                     before_state=before, after_state=rule.to_dict(), ip_address=req.remote_addr)
+    return success(rule.to_dict(), "Règle douanière mise à jour.")
+
+
+@pricing_bp.route("/<cc>/customs/<int:rule_id>", methods=["DELETE"])
+@admin_required
+def delete_customs(cc: str, rule_id: int):
+    cc, err = _country_or_404(cc)
+    if err:
+        return err
+
+    rule = CustomsRule.query.filter_by(id=rule_id, country_code=cc).first()
+    if not rule:
+        return not_found("Règle douanière introuvable.")
+
+    before = rule.to_dict()
+    db.session.delete(rule)
+    db.session.commit()
+
+    AuditService.log("customs_rule", "delete", entity_id=rule_id, actor=current_user(),
+                     before_state=before, ip_address=req.remote_addr)
+    return success(message="Règle douanière supprimée.")

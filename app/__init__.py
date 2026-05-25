@@ -16,7 +16,11 @@ def create_app(config=None):
     app.config.from_object(config)
 
     # ── Extensions ────────────────────────────────────────────────────────────
-    cors.init_app(app, origins=[app.config.get("FRONTEND_URL", "*")])
+    # CORS : auth par header Bearer (pas de cookies) → wildcard sûr en dev.
+    # En prod, définir CORS_ORIGINS (origines séparées par des virgules).
+    _cors_origins = os.environ.get("CORS_ORIGINS", "*").strip()
+    _origins = "*" if _cors_origins == "*" else [o.strip() for o in _cors_origins.split(",")]
+    cors.init_app(app, resources={r"/api/*": {"origins": _origins}})
     db.init_app(app)
     migrate.init_app(app, db)
     jwt.init_app(app)
